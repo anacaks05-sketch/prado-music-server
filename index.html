@@ -1,158 +1,392 @@
-from flask import Flask, request, jsonify, send_file, Response
-import yt_dlp
-import os
-import zipfile
-import tempfile
-import uuid
-import threading
-import time
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Prado Music DL">
+<title>Prado Music DL</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0A0A0F; --surface: #111118; --card: #16161F;
+    --border: rgba(255,255,255,0.07);
+    --accent: #7C3AED; --accent2: #A855F7; --glow: rgba(124,58,237,0.35);
+    --text: #F0EEFF; --muted: #6B6B8A;
+    --success: #22C55E; --warn: #F59E0B; --error: #EF4444;
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Inter', sans-serif; min-height: 100dvh;
+    padding: env(safe-area-inset-top,20px) 0 env(safe-area-inset-bottom,0);
+  }
+  body::before {
+    content: ''; position: fixed; top: -30%; left: 50%;
+    transform: translateX(-50%); width: 700px; height: 700px;
+    background: radial-gradient(circle, rgba(124,58,237,0.13) 0%, transparent 65%);
+    pointer-events: none; z-index: 0;
+  }
+  .app { position: relative; z-index: 1; max-width: 480px; margin: 0 auto; padding: 20px 16px 60px; }
 
-app = Flask(__name__)
+  /* Header */
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; padding-top: 8px; }
+  .logo-icon {
+    width: 46px; height: 46px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 13px; display: flex; align-items: center; justify-content: center;
+    font-size: 24px; flex-shrink: 0; box-shadow: 0 0 24px var(--glow);
+  }
+  .logo-title { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 19px; line-height: 1; }
+  .logo-sub { font-size: 10px; color: var(--muted); letter-spacing: 1.2px; margin-top: 3px; }
 
-def add_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
+  /* Input */
+  .input-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
+  .input-label { font-size: 11px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+  textarea {
+    width: 100%; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--text); font-family: 'Inter', sans-serif;
+    font-size: 14px; line-height: 1.7; padding: 13px; resize: none;
+    min-height: 160px; outline: none; transition: border-color 0.2s; -webkit-appearance: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+  textarea::placeholder { color: var(--muted); }
+  .input-hint { font-size: 11px; color: var(--muted); margin-top: 8px; }
 
-@app.after_request
-def after_request(response):
-    return add_cors(response)
+  /* Botão */
+  .btn-row { display: flex; gap: 10px; margin-bottom: 16px; }
+  .btn-main {
+    flex: 1; padding: 16px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border: none; border-radius: 12px; color: #fff;
+    font-family: 'Syne', sans-serif; font-weight: 700; font-size: 15px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+    box-shadow: 0 4px 28px var(--glow); -webkit-tap-highlight-color: transparent;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+  .btn-main:active { transform: scale(0.98); opacity: 0.9; }
+  .btn-main:disabled { opacity: 0.4; cursor: default; }
+  .btn-clear {
+    padding: 16px 18px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; color: var(--muted); font-size: 19px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
 
-@app.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        resp = Response()
-        resp.headers['Access-Control-Allow-Origin'] = '*'
-        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        return resp, 200
+  /* Progress card */
+  .progress-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px; margin-bottom: 14px;
+    display: none;
+  }
+  .progress-card.visible { display: block; }
 
-jobs = {}
+  .progress-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .progress-label { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 14px; }
+  .progress-count { font-size: 12px; color: var(--accent2); font-weight: 600; }
 
-def download_musics(job_id, music_list):
-    try:
-        jobs[job_id]['status'] = 'downloading'
-        tmpdir = tempfile.mkdtemp()
-        errors = []
+  .progress-track { height: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; margin-bottom: 12px; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 6px; transition: width 0.5s ease; width: 0%; }
 
-        for i, music in enumerate(music_list):
-            try:
-                jobs[job_id]['current'] = music
-                jobs[job_id]['progress'] = i
-                jobs[job_id]['total'] = len(music_list)
+  .progress-current { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .spinner { width: 13px; height: 13px; border: 2px solid var(--border); border-top-color: var(--accent2); border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                    'quiet': True,
-                    'no_warnings': True,
-                    'default_search': 'ytsearch1',
-                    'noplaylist': True,
-                }
+  /* Download card */
+  .download-card {
+    background: linear-gradient(135deg, rgba(34,197,94,0.1), rgba(34,197,94,0.05));
+    border: 1px solid rgba(34,197,94,0.3);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 14px;
+    text-align: center; display: none;
+  }
+  .download-card.visible { display: block; }
+  .download-icon { font-size: 40px; margin-bottom: 10px; }
+  .download-title { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 18px; color: #22C55E; margin-bottom: 4px; }
+  .download-sub { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([music])
+  .btn-download {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: #22C55E; border: none; border-radius: 12px;
+    color: #fff; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 15px;
+    padding: 14px 28px; cursor: pointer; -webkit-tap-highlight-color: transparent;
+    transition: opacity 0.2s, transform 0.1s; box-shadow: 0 4px 20px rgba(34,197,94,0.3);
+  }
+  .btn-download:active { transform: scale(0.97); opacity: 0.9; }
 
-            except Exception as e:
-                errors.append({'music': music, 'error': str(e)})
+  .errors-box { margin-top: 12px; text-align: left; }
+  .errors-title { font-size: 11px; color: var(--warn); margin-bottom: 6px; font-weight: 600; }
+  .error-item { font-size: 11px; color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border); }
 
-        zip_path = os.path.join(tmpdir, f'prado-music-{job_id[:8]}.zip')
-        mp3_files = [f for f in os.listdir(tmpdir) if f.endswith('.mp3')]
+  /* Track list status */
+  .tracks-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+  .track-row {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 11px 13px; display: flex; align-items: center; gap: 10px;
+    animation: fadeUp 0.25s ease both;
+  }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+  .track-row-num { font-family:'Syne',sans-serif; font-size:11px; font-weight:700; color:var(--accent2); min-width:18px; text-align:center; }
+  .track-row-name { flex:1; font-size:13px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .track-row-status { font-size:11px; font-weight:600; padding:3px 8px; border-radius:6px; flex-shrink:0; }
+  .status-wait  { background:rgba(107,107,138,0.15); color:var(--muted); }
+  .status-dl    { background:rgba(124,58,237,0.15); color:var(--accent2); }
+  .status-ok    { background:rgba(34,197,94,0.12); color:#22C55E; }
+  .status-err   { background:rgba(239,68,68,0.12); color:var(--error); }
 
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for mp3 in mp3_files:
-                zf.write(os.path.join(tmpdir, mp3), mp3)
+  /* Instrução iOS */
+  .ios-tip {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px; font-size: 12px; color: var(--muted); line-height: 1.6;
+    margin-top: 12px; display: none;
+  }
+  .ios-tip.visible { display: block; }
+  .ios-tip strong { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="app">
 
-        jobs[job_id]['status'] = 'done'
-        jobs[job_id]['zip_path'] = zip_path
-        jobs[job_id]['errors'] = errors
-        jobs[job_id]['count'] = len(mp3_files)
-        jobs[job_id]['progress'] = len(music_list)
+  <header>
+    <div class="logo-icon">🎵</div>
+    <div style="display:flex;flex-direction:column">
+      <div class="logo-title">Prado Music DL</div>
+      <div class="logo-sub">DOWNLOAD DE MP3 EM ZIP</div>
+    </div>
+  </header>
 
-        def cleanup():
-            time.sleep(1800)
-            if job_id in jobs:
-                del jobs[job_id]
-        threading.Thread(target=cleanup, daemon=True).start()
+  <!-- Input -->
+  <div class="input-card">
+    <div class="input-label">Lista de músicas</div>
+    <textarea id="musicInput" placeholder="Cole aqui, uma por linha:
 
-    except Exception as e:
-        jobs[job_id]['status'] = 'error'
-        jobs[job_id]['error'] = str(e)
+Jeito Moleque - Pára Tudo
+Thiaguinho - Esquema Preferido
+Sorriso Maroto - Por Você
+Jorge e Mateus - Com Você
+Henrique e Juliano - Liberdade Provisória"></textarea>
+    <div class="input-hint">Até 20 músicas por vez • Formato: Artista - Música</div>
+  </div>
 
+  <div class="btn-row">
+    <button class="btn-main" id="mainBtn" onclick="startDownload()">
+      ⬇️ Baixar Todas em ZIP
+    </button>
+    <button class="btn-clear" onclick="resetApp()">🗑️</button>
+  </div>
 
-@app.route('/')
-def index():
-    return send_file('index.html')
+  <!-- Progress -->
+  <div class="progress-card" id="progressCard">
+    <div class="progress-top">
+      <div class="progress-label">Baixando músicas...</div>
+      <div class="progress-count" id="progressCount">0 / 0</div>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <div class="progress-current">
+      <div class="spinner"></div>
+      <span id="progressCurrent">Iniciando...</span>
+    </div>
+  </div>
 
+  <!-- Track list -->
+  <div class="tracks-list" id="tracksList"></div>
 
-@app.route('/download', methods=['POST', 'OPTIONS'])
-def start_download():
-    data = request.get_json()
-    music_list = data.get('musics', [])
+  <!-- Download pronto -->
+  <div class="download-card" id="downloadCard">
+    <div class="download-icon">🎶</div>
+    <div class="download-title" id="downloadTitle">ZIP pronto!</div>
+    <div class="download-sub" id="downloadSub">Toque para baixar todos os MP3s</div>
+    <button class="btn-download" id="downloadBtn" onclick="downloadZip()">
+      ⬇️ Baixar ZIP
+    </button>
+    <div class="errors-box" id="errorsBox" style="display:none">
+      <div class="errors-title">⚠️ Músicas não encontradas:</div>
+      <div id="errorsList"></div>
+    </div>
+  </div>
 
-    if not music_list:
-        return jsonify({'error': 'Lista vazia'}), 400
-    if len(music_list) > 20:
-        return jsonify({'error': 'Máximo 20 músicas'}), 400
+  <!-- Dica iOS -->
+  <div class="ios-tip" id="iosTip">
+    📱 <strong>No iPhone:</strong> Após baixar o ZIP, abra o app <strong>Arquivos</strong> → encontre o ZIP → toque e segure → <strong>Descompactar</strong> → os MP3s ficam salvos!
+  </div>
 
-    job_id = str(uuid.uuid4())
-    jobs[job_id] = {
-        'status': 'queued',
-        'current': '',
-        'progress': 0,
-        'total': len(music_list),
-        'zip_path': None,
-        'errors': [],
-        'count': 0
+</div>
+
+<script>
+// ⚠️ TROQUE PELA URL DO SEU SERVIDOR NO RENDER
+const SERVER_URL = 'https://prado-music-server.onrender.com';
+
+let currentJobId = null;
+let pollInterval = null;
+let tracks = [];
+
+function parseTracks(raw) {
+  return raw.split('\n').map(l => l.trim()).filter(l => l.length > 1).slice(0, 20);
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function renderTrackList(list) {
+  const el = document.getElementById('tracksList');
+  el.innerHTML = list.map((t, i) => `
+    <div class="track-row" style="animation-delay:${i*0.03}s" id="trow-${i}">
+      <div class="track-row-num">${i+1}</div>
+      <div class="track-row-name">${esc(t)}</div>
+      <div class="track-row-status status-wait" id="tstatus-${i}">Fila</div>
+    </div>
+  `).join('');
+}
+
+async function startDownload() {
+  const raw = document.getElementById('musicInput').value.trim();
+  if (!raw) {
+    const ta = document.getElementById('musicInput');
+    ta.style.borderColor = 'var(--error)';
+    setTimeout(() => ta.style.borderColor = '', 1200);
+    return;
+  }
+
+  tracks = parseTracks(raw);
+  if (!tracks.length) return;
+
+  // Reset UI
+  document.getElementById('downloadCard').classList.remove('visible');
+  document.getElementById('iosTip').classList.remove('visible');
+  document.getElementById('errorsBox').style.display = 'none';
+
+  const btn = document.getElementById('mainBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="border-top-color:#fff;width:14px;height:14px;border-width:2px"></div> Enviando...';
+
+  renderTrackList(tracks);
+
+  document.getElementById('progressCard').classList.add('visible');
+  document.getElementById('progressCount').textContent = `0 / ${tracks.length}`;
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('progressCurrent').textContent = 'Conectando ao servidor...';
+
+  try {
+    const res = await fetch(`${SERVER_URL}/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ musics: tracks })
+    });
+
+    if (!res.ok) throw new Error('Erro ao iniciar download');
+    const data = await res.json();
+    currentJobId = data.job_id;
+
+    btn.innerHTML = '⏳ Processando...';
+    pollStatus();
+
+  } catch (e) {
+    showError('Não foi possível conectar ao servidor. Verifique se o Render está online.');
+    btn.disabled = false;
+    btn.innerHTML = '⬇️ Baixar Todas em ZIP';
+  }
+}
+
+function pollStatus() {
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(async () => {
+    try {
+      const res = await fetch(`${SERVER_URL}/status/${currentJobId}`);
+      const data = await res.json();
+
+      const prog = data.total > 0 ? Math.round((data.progress / data.total) * 100) : 0;
+      document.getElementById('progressFill').style.width = `${prog}%`;
+      document.getElementById('progressCount').textContent = `${data.progress} / ${data.total}`;
+      document.getElementById('progressCurrent').textContent = data.current || 'Processando...';
+
+      // Atualiza status das tracks
+      for (let i = 0; i < tracks.length; i++) {
+        const el = document.getElementById(`tstatus-${i}`);
+        if (!el) continue;
+        if (i < data.progress) {
+          el.className = 'track-row-status status-ok'; el.textContent = '✓ OK';
+        } else if (i === data.progress && data.status === 'downloading') {
+          el.className = 'track-row-status status-dl'; el.textContent = '⬇️';
+        }
+      }
+
+      if (data.status === 'done') {
+        clearInterval(pollInterval);
+        onDone(data);
+      } else if (data.status === 'error') {
+        clearInterval(pollInterval);
+        showError(data.error || 'Erro desconhecido no servidor');
+      }
+
+    } catch (e) {
+      // silencia erros de rede temporários
     }
+  }, 2000);
+}
 
-    thread = threading.Thread(target=download_musics, args=(job_id, music_list))
-    thread.daemon = True
-    thread.start()
+function onDone(data) {
+  document.getElementById('progressCard').classList.remove('visible');
 
-    return jsonify({'job_id': job_id})
+  // Marca erros na lista
+  if (data.errors && data.errors.length) {
+    data.errors.forEach(err => {
+      const idx = tracks.indexOf(err.music);
+      if (idx >= 0) {
+        const el = document.getElementById(`tstatus-${idx}`);
+        if (el) { el.className = 'track-row-status status-err'; el.textContent = '✗ Erro'; }
+      }
+    });
+  }
 
+  const ok = data.count || 0;
+  const errs = data.errors ? data.errors.length : 0;
 
-@app.route('/status/<job_id>', methods=['GET'])
-def get_status(job_id):
-    job = jobs.get(job_id)
-    if not job:
-        return jsonify({'error': 'Job não encontrado'}), 404
-    return jsonify({
-        'status': job['status'],
-        'current': job.get('current', ''),
-        'progress': job.get('progress', 0),
-        'total': job.get('total', 0),
-        'count': job.get('count', 0),
-        'errors': job.get('errors', []),
-        'error': job.get('error', '')
-    })
+  document.getElementById('downloadTitle').textContent = `${ok} música${ok !== 1 ? 's' : ''} prontas!`;
+  document.getElementById('downloadSub').textContent = errs > 0
+    ? `ZIP com ${ok} MP3s • ${errs} não encontrada${errs !== 1 ? 's' : ''}`
+    : `ZIP com todos os ${ok} MP3s pronto para baixar`;
 
+  if (data.errors && data.errors.length) {
+    document.getElementById('errorsBox').style.display = 'block';
+    document.getElementById('errorsList').innerHTML = data.errors.map(e =>
+      `<div class="error-item">❌ ${esc(e.music)}</div>`
+    ).join('');
+  }
 
-@app.route('/get-zip/<job_id>', methods=['GET'])
-def get_zip(job_id):
-    job = jobs.get(job_id)
-    if not job or job['status'] != 'done':
-        return jsonify({'error': 'ZIP não disponível'}), 404
+  document.getElementById('downloadCard').classList.add('visible');
+  document.getElementById('iosTip').classList.add('visible');
 
-    zip_path = job.get('zip_path')
-    if not zip_path or not os.path.exists(zip_path):
-        return jsonify({'error': 'Arquivo não encontrado'}), 404
+  const btn = document.getElementById('mainBtn');
+  btn.disabled = false;
+  btn.innerHTML = '🔄 Nova Lista';
+}
 
-    return send_file(
-        zip_path,
-        as_attachment=True,
-        download_name='prado-musics.zip',
-        mimetype='application/zip'
-    )
+function downloadZip() {
+  if (!currentJobId) return;
+  window.location.href = `${SERVER_URL}/get-zip/${currentJobId}`;
+}
 
+function showError(msg) {
+  document.getElementById('progressCard').classList.remove('visible');
+  alert('❌ ' + msg);
+  const btn = document.getElementById('mainBtn');
+  btn.disabled = false;
+  btn.innerHTML = '⬇️ Baixar Todas em ZIP';
+}
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+function resetApp() {
+  if (pollInterval) clearInterval(pollInterval);
+  document.getElementById('musicInput').value = '';
+  document.getElementById('tracksList').innerHTML = '';
+  document.getElementById('progressCard').classList.remove('visible');
+  document.getElementById('downloadCard').classList.remove('visible');
+  document.getElementById('iosTip').classList.remove('visible');
+  const btn = document.getElementById('mainBtn');
+  btn.disabled = false;
+  btn.innerHTML = '⬇️ Baixar Todas em ZIP';
+  currentJobId = null; tracks = [];
+}
+</script>
+</body>
+</html>
