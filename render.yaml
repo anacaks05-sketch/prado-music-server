@@ -1,2 +1,2 @@
-build_command: pip install -r requirements.txt
+build_command: apt-get install -y ffmpeg && pip install -r requirements.txt
 start_command: python app.py

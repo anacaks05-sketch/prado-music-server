@@ -6,6 +6,7 @@ import tempfile
 import uuid
 import threading
 import time
+import subprocess
 
 app = Flask(__name__)
 
@@ -54,6 +55,7 @@ def download_musics(job_id, music_list):
                     'no_warnings': True,
                     'default_search': 'ytsearch1',
                     'noplaylist': True,
+                    'ffmpeg_location': '/usr/bin/ffmpeg',
                 }
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -90,12 +92,10 @@ def download_musics(job_id, music_list):
 def index():
     return send_file('index.html')
 
-
 @app.route('/download', methods=['POST', 'OPTIONS'])
 def start_download():
     data = request.get_json()
     music_list = data.get('musics', [])
-
     if not music_list:
         return jsonify({'error': 'Lista vazia'}), 400
     if len(music_list) > 20:
@@ -103,19 +103,14 @@ def start_download():
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
-        'status': 'queued',
-        'current': '',
-        'progress': 0,
-        'total': len(music_list),
-        'zip_path': None,
-        'errors': [],
-        'count': 0
+        'status': 'queued', 'current': '',
+        'progress': 0, 'total': len(music_list),
+        'zip_path': None, 'errors': [], 'count': 0
     }
 
     thread = threading.Thread(target=download_musics, args=(job_id, music_list))
     thread.daemon = True
     thread.start()
-
     return jsonify({'job_id': job_id})
 
 
@@ -140,17 +135,10 @@ def get_zip(job_id):
     job = jobs.get(job_id)
     if not job or job['status'] != 'done':
         return jsonify({'error': 'ZIP não disponível'}), 404
-
     zip_path = job.get('zip_path')
     if not zip_path or not os.path.exists(zip_path):
         return jsonify({'error': 'Arquivo não encontrado'}), 404
-
-    return send_file(
-        zip_path,
-        as_attachment=True,
-        download_name='prado-musics.zip',
-        mimetype='application/zip'
-    )
+    return send_file(zip_path, as_attachment=True, download_name='prado-musics.zip', mimetype='application/zip')
 
 
 if __name__ == '__main__':
