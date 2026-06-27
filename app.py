@@ -30,52 +30,50 @@ def handle_options():
 jobs = {}
 
 def try_download(music, tmpdir):
-    """Tenta baixar de várias fontes, retorna path do mp3 ou None"""
-    
+    uid = str(uuid.uuid4())[:8]
+
     sources = [
-        # SoundCloud
+        # SoundCloud — sem precisar de ffmpeg
         {
             'default_search': 'scsearch1',
-            'format': 'bestaudio/best',
+            'format': 'bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio',
+            'outtmpl': os.path.join(tmpdir, f'{uid}_%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
         },
-        # YouTube com user-agent mobile
+        # YouTube android client — menos bloqueios
         {
             'default_search': 'ytsearch1',
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',
-            'http_headers': {
-                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
-            },
+            'format': 'bestaudio[ext=webm]/bestaudio',
+            'outtmpl': os.path.join(tmpdir, f'{uid}_%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'extractor_args': {'youtube': {'player_client': ['android']}},
         },
     ]
 
-    uid = str(uuid.uuid4())[:8]
-    out_template = os.path.join(tmpdir, f'{uid}_%(title)s.%(ext)s')
-
-    for src in sources:
+    for opts in sources:
         try:
-            ydl_opts = {
-                **src,
-                'outtmpl': out_template,
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([music])
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(music, download=True)
+                title = info.get('title', music)
 
-            # Acha o mp3 gerado
             for f in os.listdir(tmpdir):
-                if f.startswith(uid) and f.endswith('.mp3'):
-                    return os.path.join(tmpdir, f), f
-        except:
+                if f.startswith(uid):
+                    fpath = os.path.join(tmpdir, f)
+                    # Renomeia para .mp3 se precisar
+                    if not f.endswith('.mp3'):
+                        newpath = fpath.rsplit('.', 1)[0] + '.mp3'
+                        os.rename(fpath, newpath)
+                        fpath = newpath
+                        f = os.path.basename(newpath)
+                    return fpath, f, title
+        except Exception as e:
             continue
 
-    return None, None
+    return None, None, None
 
 
 def process_job(job_id, music_list):
@@ -89,32 +87,23 @@ def process_job(job_id, music_list):
             jobs[job_id]['progress'] = i
             jobs[job_id]['total'] = len(music_list)
 
-            mp3_path, mp3_name = try_download(music, tmpdir)
+            path, fname, title = try_download(music, tmpdir)
 
-            if mp3_path:
-                results.append({
-                    'music': music,
-                    'path': mp3_path,
-                    'name': mp3_name,
-                    'status': 'ok'
-                })
-            else:
-                results.append({
-                    'music': music,
-                    'path': None,
-                    'name': None,
-                    'status': 'error'
-                })
+            results.append({
+                'music': music,
+                'title': title or music,
+                'path': path,
+                'name': fname,
+                'status': 'ok' if path else 'error'
+            })
 
         jobs[job_id]['status'] = 'done'
         jobs[job_id]['results'] = results
         jobs[job_id]['progress'] = len(music_list)
-        jobs[job_id]['tmpdir'] = tmpdir
 
         def cleanup():
             time.sleep(3600)
-            if job_id in jobs:
-                del jobs[job_id]
+            jobs.pop(job_id, None)
         threading.Thread(target=cleanup, daemon=True).start()
 
     except Exception as e:
@@ -154,7 +143,6 @@ def get_status(job_id):
     job = jobs.get(job_id)
     if not job:
         return jsonify({'error': 'Job não encontrado'}), 404
-
     results = job.get('results', [])
     return jsonify({
         'status': job['status'],
@@ -162,14 +150,7 @@ def get_status(job_id):
         'progress': job.get('progress', 0),
         'total': job.get('total', 0),
         'error': job.get('error', ''),
-        'tracks': [
-            {
-                'music': r['music'],
-                'status': r['status'],
-                'name': r['name'],
-                'index': i
-            } for i, r in enumerate(results)
-        ]
+        'tracks': [{'index': i, 'music': r['music'], 'title': r.get('title',''), 'name': r.get('name',''), 'status': r['status']} for i, r in enumerate(results)]
     })
 
 
@@ -177,22 +158,15 @@ def get_status(job_id):
 def get_mp3(job_id, index):
     job = jobs.get(job_id)
     if not job:
-        return jsonify({'error': 'Job não encontrado'}), 404
-
+        return jsonify({'error': 'Não encontrado'}), 404
     results = job.get('results', [])
     if index >= len(results):
         return jsonify({'error': 'Índice inválido'}), 404
-
     track = results[index]
     if track['status'] != 'ok' or not track['path']:
-        return jsonify({'error': 'MP3 não disponível'}), 404
-
-    return send_file(
-        track['path'],
-        as_attachment=True,
-        download_name=track['name'],
-        mimetype='audio/mpeg'
-    )
+        return jsonify({'error': 'MP3 indisponível'}), 404
+    return send_file(track['path'], as_attachment=True,
+                     download_name=track['name'], mimetype='audio/mpeg')
 
 
 if __name__ == '__main__':
