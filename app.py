@@ -1,5 +1,4 @@
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+from flask import Flask, request, jsonify, send_file, Response
 import yt_dlp
 import os
 import zipfile
@@ -9,16 +8,32 @@ import threading
 import time
 
 app = Flask(__name__)
-CORS(app)
 
-# Armazena jobs em memória
+def add_cors(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+@app.after_request
+def after_request(response):
+    return add_cors(response)
+
+@app.before_request
+def handle_options():
+    if request.method == 'OPTIONS':
+        resp = Response()
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return resp, 200
+
 jobs = {}
 
 def download_musics(job_id, music_list):
     try:
         jobs[job_id]['status'] = 'downloading'
         tmpdir = tempfile.mkdtemp()
-        downloaded = []
         errors = []
 
         for i, music in enumerate(music_list):
@@ -44,12 +59,9 @@ def download_musics(job_id, music_list):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([music])
 
-                downloaded.append(music)
-
             except Exception as e:
                 errors.append({'music': music, 'error': str(e)})
 
-        # Criar ZIP com todos os MP3s
         zip_path = os.path.join(tmpdir, f'prado-music-{job_id[:8]}.zip')
         mp3_files = [f for f in os.listdir(tmpdir) if f.endswith('.mp3')]
 
@@ -59,12 +71,10 @@ def download_musics(job_id, music_list):
 
         jobs[job_id]['status'] = 'done'
         jobs[job_id]['zip_path'] = zip_path
-        jobs[job_id]['downloaded'] = downloaded
         jobs[job_id]['errors'] = errors
         jobs[job_id]['count'] = len(mp3_files)
-        jobs[job_id]['tmpdir'] = tmpdir
+        jobs[job_id]['progress'] = len(music_list)
 
-        # Limpar job depois de 30 minutos
         def cleanup():
             time.sleep(1800)
             if job_id in jobs:
@@ -81,16 +91,15 @@ def index():
     return send_file('index.html')
 
 
-@app.route('/download', methods=['POST'])
+@app.route('/download', methods=['POST', 'OPTIONS'])
 def start_download():
     data = request.get_json()
     music_list = data.get('musics', [])
 
     if not music_list:
         return jsonify({'error': 'Lista vazia'}), 400
-
     if len(music_list) > 20:
-        return jsonify({'error': 'Máximo 20 músicas por vez'}), 400
+        return jsonify({'error': 'Máximo 20 músicas'}), 400
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
@@ -110,7 +119,7 @@ def start_download():
     return jsonify({'job_id': job_id})
 
 
-@app.route('/status/<job_id>')
+@app.route('/status/<job_id>', methods=['GET'])
 def get_status(job_id):
     job = jobs.get(job_id)
     if not job:
@@ -126,7 +135,7 @@ def get_status(job_id):
     })
 
 
-@app.route('/get-zip/<job_id>')
+@app.route('/get-zip/<job_id>', methods=['GET'])
 def get_zip(job_id):
     job = jobs.get(job_id)
     if not job or job['status'] != 'done':
@@ -139,7 +148,7 @@ def get_zip(job_id):
     return send_file(
         zip_path,
         as_attachment=True,
-        download_name=f'prado-musics.zip',
+        download_name='prado-musics.zip',
         mimetype='application/zip'
     )
 
