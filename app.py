@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify, send_file, Response
 import yt_dlp
 import os
-import zipfile
 import tempfile
 import uuid
 import threading
@@ -30,82 +29,90 @@ def handle_options():
 
 jobs = {}
 
-def download_musics(job_id, music_list):
+def try_download(music, tmpdir):
+    """Tenta baixar de várias fontes, retorna path do mp3 ou None"""
+    
+    sources = [
+        # SoundCloud
+        {
+            'default_search': 'scsearch1',
+            'format': 'bestaudio/best',
+        },
+        # YouTube com user-agent mobile
+        {
+            'default_search': 'ytsearch1',
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+            'http_headers': {
+                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
+            },
+        },
+    ]
+
+    uid = str(uuid.uuid4())[:8]
+    out_template = os.path.join(tmpdir, f'{uid}_%(title)s.%(ext)s')
+
+    for src in sources:
+        try:
+            ydl_opts = {
+                **src,
+                'outtmpl': out_template,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([music])
+
+            # Acha o mp3 gerado
+            for f in os.listdir(tmpdir):
+                if f.startswith(uid) and f.endswith('.mp3'):
+                    return os.path.join(tmpdir, f), f
+        except:
+            continue
+
+    return None, None
+
+
+def process_job(job_id, music_list):
     try:
         jobs[job_id]['status'] = 'downloading'
         tmpdir = tempfile.mkdtemp()
-        errors = []
+        results = []
 
         for i, music in enumerate(music_list):
             jobs[job_id]['current'] = music
             jobs[job_id]['progress'] = i
             jobs[job_id]['total'] = len(music_list)
 
-            success = False
+            mp3_path, mp3_name = try_download(music, tmpdir)
 
-            # Tenta SoundCloud primeiro
-            try:
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                    'quiet': True,
-                    'no_warnings': True,
-                    'default_search': 'scsearch1',
-                    'noplaylist': True,
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([music])
-                success = True
-            except Exception as e1:
-                # Tenta YouTube como fallback com cookies simulados
-                try:
-                    ydl_opts2 = {
-                        'format': 'bestaudio/best',
-                        'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                        'quiet': True,
-                        'no_warnings': True,
-                        'default_search': 'ytsearch1',
-                        'noplaylist': True,
-                        'extractor_args': {
-                            'youtube': {
-                                'skip': ['hls', 'dash'],
-                            }
-                        },
-                        'http_headers': {
-                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-                        },
-                    }
-                    with yt_dlp.YoutubeDL(ydl_opts2) as ydl:
-                        ydl.download([music])
-                    success = True
-                except Exception as e2:
-                    errors.append({'music': music, 'error': str(e2)})
-
-        zip_path = os.path.join(tmpdir, f'prado-music-{job_id[:8]}.zip')
-        mp3_files = [f for f in os.listdir(tmpdir) if f.endswith('.mp3')]
-
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for mp3 in mp3_files:
-                zf.write(os.path.join(tmpdir, mp3), mp3)
+            if mp3_path:
+                results.append({
+                    'music': music,
+                    'path': mp3_path,
+                    'name': mp3_name,
+                    'status': 'ok'
+                })
+            else:
+                results.append({
+                    'music': music,
+                    'path': None,
+                    'name': None,
+                    'status': 'error'
+                })
 
         jobs[job_id]['status'] = 'done'
-        jobs[job_id]['zip_path'] = zip_path
-        jobs[job_id]['errors'] = errors
-        jobs[job_id]['count'] = len(mp3_files)
+        jobs[job_id]['results'] = results
         jobs[job_id]['progress'] = len(music_list)
+        jobs[job_id]['tmpdir'] = tmpdir
 
         def cleanup():
-            time.sleep(1800)
+            time.sleep(3600)
             if job_id in jobs:
                 del jobs[job_id]
         threading.Thread(target=cleanup, daemon=True).start()
@@ -118,6 +125,7 @@ def download_musics(job_id, music_list):
 @app.route('/')
 def index():
     return send_file('index.html')
+
 
 @app.route('/download', methods=['POST', 'OPTIONS'])
 def start_download():
@@ -132,40 +140,59 @@ def start_download():
     jobs[job_id] = {
         'status': 'queued', 'current': '',
         'progress': 0, 'total': len(music_list),
-        'zip_path': None, 'errors': [], 'count': 0
+        'results': [], 'error': ''
     }
 
-    thread = threading.Thread(target=download_musics, args=(job_id, music_list))
-    thread.daemon = True
-    thread.start()
+    t = threading.Thread(target=process_job, args=(job_id, music_list))
+    t.daemon = True
+    t.start()
     return jsonify({'job_id': job_id})
 
 
-@app.route('/status/<job_id>', methods=['GET'])
+@app.route('/status/<job_id>')
 def get_status(job_id):
     job = jobs.get(job_id)
     if not job:
         return jsonify({'error': 'Job não encontrado'}), 404
+
+    results = job.get('results', [])
     return jsonify({
         'status': job['status'],
         'current': job.get('current', ''),
         'progress': job.get('progress', 0),
         'total': job.get('total', 0),
-        'count': job.get('count', 0),
-        'errors': job.get('errors', []),
-        'error': job.get('error', '')
+        'error': job.get('error', ''),
+        'tracks': [
+            {
+                'music': r['music'],
+                'status': r['status'],
+                'name': r['name'],
+                'index': i
+            } for i, r in enumerate(results)
+        ]
     })
 
 
-@app.route('/get-zip/<job_id>', methods=['GET'])
-def get_zip(job_id):
+@app.route('/get-mp3/<job_id>/<int:index>')
+def get_mp3(job_id, index):
     job = jobs.get(job_id)
-    if not job or job['status'] != 'done':
-        return jsonify({'error': 'ZIP não disponível'}), 404
-    zip_path = job.get('zip_path')
-    if not zip_path or not os.path.exists(zip_path):
-        return jsonify({'error': 'Arquivo não encontrado'}), 404
-    return send_file(zip_path, as_attachment=True, download_name='prado-musics.zip', mimetype='application/zip')
+    if not job:
+        return jsonify({'error': 'Job não encontrado'}), 404
+
+    results = job.get('results', [])
+    if index >= len(results):
+        return jsonify({'error': 'Índice inválido'}), 404
+
+    track = results[index]
+    if track['status'] != 'ok' or not track['path']:
+        return jsonify({'error': 'MP3 não disponível'}), 404
+
+    return send_file(
+        track['path'],
+        as_attachment=True,
+        download_name=track['name'],
+        mimetype='audio/mpeg'
+    )
 
 
 if __name__ == '__main__':
