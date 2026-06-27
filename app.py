@@ -6,7 +6,6 @@ import tempfile
 import uuid
 import threading
 import time
-import subprocess
 
 app = Flask(__name__)
 
@@ -38,11 +37,14 @@ def download_musics(job_id, music_list):
         errors = []
 
         for i, music in enumerate(music_list):
-            try:
-                jobs[job_id]['current'] = music
-                jobs[job_id]['progress'] = i
-                jobs[job_id]['total'] = len(music_list)
+            jobs[job_id]['current'] = music
+            jobs[job_id]['progress'] = i
+            jobs[job_id]['total'] = len(music_list)
 
+            success = False
+
+            # Tenta SoundCloud primeiro
+            try:
                 ydl_opts = {
                     'format': 'bestaudio/best',
                     'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
@@ -53,16 +55,41 @@ def download_musics(job_id, music_list):
                     }],
                     'quiet': True,
                     'no_warnings': True,
-                    'default_search': 'ytsearch1',
+                    'default_search': 'scsearch1',
                     'noplaylist': True,
-                    'ffmpeg_location': '/usr/bin/ffmpeg',
                 }
-
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([music])
-
-            except Exception as e:
-                errors.append({'music': music, 'error': str(e)})
+                success = True
+            except Exception as e1:
+                # Tenta YouTube como fallback com cookies simulados
+                try:
+                    ydl_opts2 = {
+                        'format': 'bestaudio/best',
+                        'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }],
+                        'quiet': True,
+                        'no_warnings': True,
+                        'default_search': 'ytsearch1',
+                        'noplaylist': True,
+                        'extractor_args': {
+                            'youtube': {
+                                'skip': ['hls', 'dash'],
+                            }
+                        },
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+                        },
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts2) as ydl:
+                        ydl.download([music])
+                    success = True
+                except Exception as e2:
+                    errors.append({'music': music, 'error': str(e2)})
 
         zip_path = os.path.join(tmpdir, f'prado-music-{job_id[:8]}.zip')
         mp3_files = [f for f in os.listdir(tmpdir) if f.endswith('.mp3')]
